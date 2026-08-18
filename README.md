@@ -13,9 +13,11 @@ npm run dev -- --host
 npm run build
 ```
 
+`npm run dev -- --host` is the "NPM Run Host Dev" button, for when you want the dev server reachable from other machines on your network rather than just localhost.
+
 This also allow you to seperate your front and back end files, if you seperate them. (As seen in screenshot above).
 
-Each directory you add runs independently: you can have `npm run dev` going on one project and `npm start` on another at the same time. The dropdown shows a ● next to any project with something running, and the buttons/statuses always reflect the project currently selected.
+Each directory you add runs independently: you can have `npm run dev` going on one project and `npm start` on another at the same time. The dropdown shows a ● next to any project with something running, and the buttons/statuses always reflect the project currently selected. Within a single project only one of start / dev / host dev can run at once, since they share the same directory and port.
 
 ## To run:
 
