@@ -9,6 +9,7 @@ This app requires you to do the setup, this literally just runs the following co
 ```
 npm start
 npm run dev
+npm run dev -- --host
 npm run build
 ```
 
