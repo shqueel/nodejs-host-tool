@@ -2,7 +2,8 @@
 
 ***Please bare in mind this is a clanker written tool that cost a couple of tokens***
 
-<img width="697" height="517" alt="Image of Node JS Hosting Tool" src="https://github.com/user-attachments/assets/8efc88df-a803-4316-86ca-7f98b63a17ee" />
+<img width="849" height="519" alt="image" src="https://github.com/user-attachments/assets/c871f372-45c5-4bb6-bc3e-86afa43511b9" />
+
 
 This app requires you to do the setup, this literally just runs the following commands, but into a UI wrapper:
 
