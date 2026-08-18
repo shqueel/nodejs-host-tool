@@ -23,17 +23,53 @@ STATUS_COLORS = {
 }
 DEFAULT_STATUS_COLOR = "#555"
 
-KIND_COMMANDS = {"start": ["start"], "dev": ["run", "dev"], "build": ["run", "build"]}
-KIND_LABELS = {"start": "npm start", "dev": "npm run dev", "build": "npm run build"}
-KIND_DIRECTORY = {"start": "back", "dev": "back", "build": "front"}
-IDLE_STATUS = {"start": "stopped", "dev": "stopped", "build": "idle"}
+KINDS = {
+    "start": {
+        "args": ["start"],
+        "command": "npm start",
+        "status": "start",
+        "directory": "back",
+        "idle": "stopped",
+        "run_text": "NPM Start",
+        "stop_text": "NPM Stop",
+    },
+    "dev": {
+        "args": ["run", "dev"],
+        "command": "npm run dev",
+        "status": "dev",
+        "directory": "back",
+        "idle": "stopped",
+        "run_text": "NPM Run Dev",
+        "stop_text": "NPM Stop Dev",
+    },
+    "devhost": {
+        "args": ["run", "dev", "--", "--host"],
+        "command": "npm run dev -- --host",
+        "status": "dev --host",
+        "directory": "back",
+        "idle": "stopped",
+        "run_text": "NPM Run Host Dev",
+        "stop_text": "NPM Stop Host Dev",
+    },
+    "build": {
+        "args": ["run", "build"],
+        "command": "npm run build",
+        "status": "build",
+        "directory": "front",
+        "idle": "idle",
+        "run_text": "NPM Run Build",
+        "stop_text": "Building...",
+    },
+}
+# These share the back directory (and its port), so only one may run per node.
+SERVER_KINDS = ("start", "dev", "devhost")
 RUNNING_MARKER = "● "
 
 
 def new_state():
     return {
-        kind: {"proc": None, "status": IDLE_STATUS[kind], "stopping": False}
-        for kind in KIND_COMMANDS
+        kind: {"proc": None, "status": spec["idle"], "stopping": False}
+        for kind, spec in KINDS.items()
     }
 
 
@@ -152,8 +188,8 @@ class NpmHostApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("700x480")
-        self.root.minsize(560, 380)
+        self.root.geometry("840x480")
+        self.root.minsize(700, 380)
         self.root.configure(bg="white")
 
         config = load_config()
@@ -224,23 +260,16 @@ class NpmHostApp:
         self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
 
         status_font = ("Segoe UI", 9)
-        self.start_status_var = tk.StringVar(value="start: stopped")
-        self.start_status_label = tk.Label(
-            name_col, textvariable=self.start_status_var, bg="white", fg=DEFAULT_STATUS_COLOR, font=status_font
-        )
-        self.start_status_label.pack(anchor="w")
-
-        self.dev_status_var = tk.StringVar(value="dev: stopped")
-        self.dev_status_label = tk.Label(
-            name_col, textvariable=self.dev_status_var, bg="white", fg=DEFAULT_STATUS_COLOR, font=status_font
-        )
-        self.dev_status_label.pack(anchor="w")
-
-        self.build_status_var = tk.StringVar(value="build: idle")
-        self.build_status_label = tk.Label(
-            name_col, textvariable=self.build_status_var, bg="white", fg=DEFAULT_STATUS_COLOR, font=status_font
-        )
-        self.build_status_label.pack(anchor="w")
+        self.status_vars = {}
+        self.status_labels = {}
+        for kind, spec in KINDS.items():
+            var = tk.StringVar(value=f"{spec['status']}: {spec['idle']}")
+            label = tk.Label(
+                name_col, textvariable=var, bg="white", fg=DEFAULT_STATUS_COLOR, font=status_font
+            )
+            label.pack(anchor="w")
+            self.status_vars[kind] = var
+            self.status_labels[kind] = label
 
         btn_col = tk.Frame(top_row, bg="white")
         btn_col.pack(side=tk.RIGHT)
@@ -252,11 +281,11 @@ class NpmHostApp:
             font=btn_font,
             relief=tk.SOLID,
             borderwidth=2,
-            padx=14,
+            padx=10,
             pady=8,
             command=self._toggle_start,
         )
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 6))
 
         self.dev_btn = tk.Button(
             btn_col,
@@ -264,11 +293,23 @@ class NpmHostApp:
             font=btn_font,
             relief=tk.SOLID,
             borderwidth=2,
-            padx=14,
+            padx=10,
             pady=8,
             command=self._toggle_dev,
         )
-        self.dev_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.dev_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.dev_host_btn = tk.Button(
+            btn_col,
+            text="NPM Run Host Dev",
+            font=btn_font,
+            relief=tk.SOLID,
+            borderwidth=2,
+            padx=10,
+            pady=8,
+            command=self._toggle_host_dev,
+        )
+        self.dev_host_btn.pack(side=tk.LEFT, padx=(0, 6))
 
         self.build_btn = tk.Button(
             btn_col,
@@ -276,11 +317,18 @@ class NpmHostApp:
             font=btn_font,
             relief=tk.SOLID,
             borderwidth=2,
-            padx=14,
+            padx=10,
             pady=8,
             command=self._run_build,
         )
         self.build_btn.pack(side=tk.LEFT)
+
+        self.kind_buttons = {
+            "start": self.start_btn,
+            "dev": self.dev_btn,
+            "devhost": self.dev_host_btn,
+            "build": self.build_btn,
+        }
 
         # Spacer fills the remaining space, pushing the bottom row down
         tk.Frame(body, bg="white").pack(fill=tk.BOTH, expand=True)
@@ -358,29 +406,33 @@ class NpmHostApp:
 
     def _refresh(self):
         self._refresh_profile_combo()
-        profile = self._active_profile()
+        has_profile = self._active_profile() is not None
         state = self._active_state()
-        running = state["start"]["proc"] is not None
-        dev_running = state["dev"]["proc"] is not None
         building = state["build"]["proc"] is not None
+        server_busy = any(state[k]["proc"] is not None for k in SERVER_KINDS)
 
-        self.start_btn.configure(text="NPM Stop" if running else "NPM Start", bg="#c0392b" if running else "#2e8b3d", fg="white")
-        self.dev_btn.configure(text="NPM Stop Dev" if dev_running else "NPM Run Dev", bg="#c0392b" if dev_running else "#2e8b3d", fg="white")
-        self.build_btn.configure(text="Building..." if building else "NPM Run Build")
+        for kind, spec in KINDS.items():
+            running = state[kind]["proc"] is not None
+            button = self.kind_buttons[kind]
+            button.configure(text=spec["stop_text"] if running else spec["run_text"])
+            if kind != "build":
+                button.configure(bg="#c0392b" if running else "#2e8b3d", fg="white")
 
-        has_profile = profile is not None
-        self.start_btn.configure(state="normal" if (has_profile and not building and not dev_running) else "disabled")
-        self.dev_btn.configure(state="normal" if (has_profile and not building and not running) else "disabled")
-        self.build_btn.configure(state="normal" if (has_profile and not building) else "disabled")
+            if not has_profile or building:
+                # A build blocks everything; only the build button shows its own progress.
+                enabled = False
+            elif kind == "build":
+                enabled = True
+            else:
+                # One server per node: the running one keeps its Stop button live.
+                enabled = running or not server_busy
+            button.configure(state="normal" if enabled else "disabled")
 
-        for kind, var, label in (
-            ("start", self.start_status_var, self.start_status_label),
-            ("dev", self.dev_status_var, self.dev_status_label),
-            ("build", self.build_status_var, self.build_status_label),
-        ):
             status = state[kind]["status"]
-            var.set(f"{kind}: {status}")
-            label.configure(fg=STATUS_COLORS.get(status, DEFAULT_STATUS_COLOR))
+            self.status_vars[kind].set(f"{spec['status']}: {status}")
+            self.status_labels[kind].configure(
+                fg=STATUS_COLORS.get(status, DEFAULT_STATUS_COLOR)
+            )
 
     # ---------- process control ----------
 
@@ -389,6 +441,9 @@ class NpmHostApp:
 
     def _toggle_dev(self):
         self._toggle("dev")
+
+    def _toggle_host_dev(self):
+        self._toggle("devhost")
 
     def _run_build(self):
         profile = self._active_profile()
@@ -406,12 +461,13 @@ class NpmHostApp:
 
     def _launch(self, profile, kind):
         name = profile["name"]
+        spec = KINDS[kind]
         entry = self._state(name)[kind]
-        directory = profile.get(KIND_DIRECTORY[kind])
+        directory = profile.get(spec["directory"])
         if not directory or not os.path.isdir(directory):
             messagebox.showwarning(
                 APP_NAME,
-                f"'{name}' has no valid {KIND_DIRECTORY[kind]} directory set.",
+                f"'{name}' has no valid {spec['directory']} directory set.",
             )
             return
         npm = self._npm_path()
@@ -422,7 +478,7 @@ class NpmHostApp:
         entry["stopping"] = False
         try:
             entry["proc"] = subprocess.Popen(
-                [npm] + KIND_COMMANDS[kind],
+                [npm] + spec["args"],
                 cwd=directory,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -466,7 +522,7 @@ class NpmHostApp:
     def _stream_output(self, name, kind, proc, log_file):
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(
-                f"\n===== {KIND_LABELS[kind]} | {name} | "
+                f"\n===== {KINDS[kind]['command']} | {name} | "
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')} =====\n"
             )
             f.flush()
@@ -480,7 +536,7 @@ class NpmHostApp:
             entry = self._state(name)[kind]
             entry["proc"] = None
             if entry["stopping"] or exit_code == 0:
-                entry["status"] = IDLE_STATUS[kind]
+                entry["status"] = KINDS[kind]["idle"]
             else:
                 entry["status"] = "failed"
             entry["stopping"] = False
