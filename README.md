@@ -14,6 +14,8 @@ npm run build
 
 This also allow you to seperate your front and back end files, if you seperate them. (As seen in screenshot above).
 
+Each directory you add runs independently: you can have `npm run dev` going on one project and `npm start` on another at the same time. The dropdown shows a ● next to any project with something running, and the buttons/statuses always reflect the project currently selected.
+
 ## To run:
 
 1. Unzip File,

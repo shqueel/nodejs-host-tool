@@ -23,6 +23,19 @@ STATUS_COLORS = {
 }
 DEFAULT_STATUS_COLOR = "#555"
 
+KIND_COMMANDS = {"start": ["start"], "dev": ["run", "dev"], "build": ["run", "build"]}
+KIND_LABELS = {"start": "npm start", "dev": "npm run dev", "build": "npm run build"}
+KIND_DIRECTORY = {"start": "back", "dev": "back", "build": "front"}
+IDLE_STATUS = {"start": "stopped", "dev": "stopped", "build": "idle"}
+RUNNING_MARKER = "● "
+
+
+def new_state():
+    return {
+        kind: {"proc": None, "status": IDLE_STATUS[kind], "stopping": False}
+        for kind in KIND_COMMANDS
+    }
+
 
 def _safe_filename(name):
     return re.sub(r"[^A-Za-z0-9_-]+", "_", name) or "profile"
@@ -149,14 +162,8 @@ class NpmHostApp:
         if self.active_name not in [p["name"] for p in self.profiles]:
             self.active_name = self.profiles[0]["name"] if self.profiles else None
 
-        self.start_proc = None
-        self.dev_proc = None
-        self.build_proc = None
-        self.start_status = "stopped"
-        self.dev_status = "stopped"
-        self.build_status = "idle"
-        self.stopping = False
-        self.dev_stopping = False
+        self.states = {}
+        self._display_to_name = {}
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -172,6 +179,18 @@ class NpmHostApp:
             if p["name"] == self.active_name:
                 return p
         return None
+
+    def _state(self, name):
+        return self.states.setdefault(name, new_state())
+
+    def _active_state(self):
+        if self.active_name is None:
+            return new_state()
+        return self._state(self.active_name)
+
+    def _is_busy(self, name):
+        state = self.states.get(name)
+        return bool(state) and any(k["proc"] is not None for k in state.values())
 
     # ---------- UI ----------
 
@@ -295,12 +314,24 @@ class NpmHostApp:
     # ---------- profile management ----------
 
     def _refresh_profile_combo(self):
-        names = [p["name"] for p in self.profiles]
-        self.profile_combo.configure(values=names)
-        self.profile_var.set(self.active_name or "")
+        self._display_to_name = {}
+        displays = []
+        for profile in self.profiles:
+            name = profile["name"]
+            display = (RUNNING_MARKER + name) if self._is_busy(name) else name
+            self._display_to_name[display] = name
+            displays.append(display)
+        self.profile_combo.configure(values=displays)
+
+        active_display = ""
+        for display, name in self._display_to_name.items():
+            if name == self.active_name:
+                active_display = display
+                break
+        self.profile_var.set(active_display)
 
     def _on_profile_selected(self, _event=None):
-        self.active_name = self.profile_var.get()
+        self.active_name = self._display_to_name.get(self.profile_var.get(), self.active_name)
         self._persist()
         self._refresh()
 
@@ -327,10 +358,11 @@ class NpmHostApp:
 
     def _refresh(self):
         self._refresh_profile_combo()
-        running = self.start_proc is not None
-        dev_running = self.dev_proc is not None
-        building = self.build_proc is not None
         profile = self._active_profile()
+        state = self._active_state()
+        running = state["start"]["proc"] is not None
+        dev_running = state["dev"]["proc"] is not None
+        building = state["build"]["proc"] is not None
 
         self.start_btn.configure(text="NPM Stop" if running else "NPM Start", bg="#c0392b" if running else "#2e8b3d", fg="white")
         self.dev_btn.configure(text="NPM Stop Dev" if dev_running else "NPM Run Dev", bg="#c0392b" if dev_running else "#2e8b3d", fg="white")
@@ -341,103 +373,56 @@ class NpmHostApp:
         self.dev_btn.configure(state="normal" if (has_profile and not building and not running) else "disabled")
         self.build_btn.configure(state="normal" if (has_profile and not building) else "disabled")
 
-        self.start_status_var.set(f"start: {self.start_status}")
-        self.start_status_label.configure(
-            fg=STATUS_COLORS.get(self.start_status, DEFAULT_STATUS_COLOR)
-        )
-        self.dev_status_var.set(f"dev: {self.dev_status}")
-        self.dev_status_label.configure(
-            fg=STATUS_COLORS.get(self.dev_status, DEFAULT_STATUS_COLOR)
-        )
-        self.build_status_var.set(f"build: {self.build_status}")
-        self.build_status_label.configure(
-            fg=STATUS_COLORS.get(self.build_status, DEFAULT_STATUS_COLOR)
-        )
+        for kind, var, label in (
+            ("start", self.start_status_var, self.start_status_label),
+            ("dev", self.dev_status_var, self.dev_status_label),
+            ("build", self.build_status_var, self.build_status_label),
+        ):
+            status = state[kind]["status"]
+            var.set(f"{kind}: {status}")
+            label.configure(fg=STATUS_COLORS.get(status, DEFAULT_STATUS_COLOR))
 
     # ---------- process control ----------
 
     def _toggle_start(self):
-        if self.start_proc is None:
-            self._start_npm_start()
-        else:
-            self._stop_npm_start()
-
-    def _start_npm_start(self):
-        profile = self._active_profile()
-        if not profile:
-            return
-        directory = profile.get("back")
-        if not directory or not os.path.isdir(directory):
-            messagebox.showwarning(APP_NAME, "This profile has no valid back directory set.")
-            return
-        npm = self._npm_path()
-        if not npm:
-            return
-
-        log_file = log_path_for(profile["name"], "start")
-        self.stopping = False
-        try:
-            self.start_proc = subprocess.Popen(
-                [npm, "start"],
-                cwd=directory,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except OSError as exc:
-            self.start_status = "failed"
-            self._refresh()
-            messagebox.showerror(APP_NAME, f"Failed to start npm: {exc}")
-            self.start_proc = None
-            return
-
-        self.start_status = "running"
-        threading.Thread(
-            target=self._stream_output, args=(self.start_proc, "start", log_file), daemon=True
-        ).start()
-        self._refresh()
-
-    def _stop_npm_start(self):
-        proc = self.start_proc
-        if proc is None:
-            return
-        self.stopping = True
-        self.start_status = "stopping"
-        self._refresh()
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                capture_output=True,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except OSError:
-            pass
+        self._toggle("start")
 
     def _toggle_dev(self):
-        if self.dev_proc is None:
-            self._start_npm_dev()
-        else:
-            self._stop_npm_dev()
+        self._toggle("dev")
 
-    def _start_npm_dev(self):
+    def _run_build(self):
+        profile = self._active_profile()
+        if profile and self._state(profile["name"])["build"]["proc"] is None:
+            self._launch(profile, "build")
+
+    def _toggle(self, kind):
         profile = self._active_profile()
         if not profile:
             return
-        directory = profile.get("back")
+        if self._state(profile["name"])[kind]["proc"] is None:
+            self._launch(profile, kind)
+        else:
+            self._stop(profile["name"], kind)
+
+    def _launch(self, profile, kind):
+        name = profile["name"]
+        entry = self._state(name)[kind]
+        directory = profile.get(KIND_DIRECTORY[kind])
         if not directory or not os.path.isdir(directory):
-            messagebox.showwarning(APP_NAME, "This profile has no valid back directory set.")
+            messagebox.showwarning(
+                APP_NAME,
+                f"'{name}' has no valid {KIND_DIRECTORY[kind]} directory set.",
+            )
             return
         npm = self._npm_path()
         if not npm:
             return
 
-        log_file = log_path_for(profile["name"], "dev")
-        self.dev_stopping = False
+        log_file = log_path_for(name, kind)
+        entry["stopping"] = False
         try:
-            self.dev_proc = subprocess.Popen(
-                [npm, "run", "dev"],
+            entry["proc"] = subprocess.Popen(
+                [npm] + KIND_COMMANDS[kind],
                 cwd=directory,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -446,25 +431,29 @@ class NpmHostApp:
                 creationflags=CREATE_NO_WINDOW,
             )
         except OSError as exc:
-            self.dev_status = "failed"
+            entry["proc"] = None
+            entry["status"] = "failed"
             self._refresh()
             messagebox.showerror(APP_NAME, f"Failed to start npm: {exc}")
-            self.dev_proc = None
             return
 
-        self.dev_status = "running"
+        entry["status"] = "running"
         threading.Thread(
-            target=self._stream_output, args=(self.dev_proc, "dev", log_file), daemon=True
+            target=self._stream_output, args=(name, kind, entry["proc"], log_file), daemon=True
         ).start()
         self._refresh()
 
-    def _stop_npm_dev(self):
-        proc = self.dev_proc
+    def _stop(self, name, kind):
+        entry = self._state(name)[kind]
+        proc = entry["proc"]
         if proc is None:
             return
-        self.dev_stopping = True
-        self.dev_status = "stopping"
+        entry["stopping"] = True
+        entry["status"] = "stopping"
         self._refresh()
+        self._kill(proc)
+
+    def _kill(self, proc):
         try:
             subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
@@ -474,48 +463,12 @@ class NpmHostApp:
         except OSError:
             pass
 
-    def _run_build(self):
-        if self.build_proc is not None:
-            return
-        profile = self._active_profile()
-        if not profile:
-            return
-        directory = profile.get("front")
-        if not directory or not os.path.isdir(directory):
-            messagebox.showwarning(APP_NAME, "This profile has no valid front directory set.")
-            return
-        npm = self._npm_path()
-        if not npm:
-            return
-
-        log_file = log_path_for(profile["name"], "build")
-        try:
-            self.build_proc = subprocess.Popen(
-                [npm, "run", "build"],
-                cwd=directory,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except OSError as exc:
-            self.build_status = "failed"
-            self._refresh()
-            messagebox.showerror(APP_NAME, f"Failed to start npm: {exc}")
-            self.build_proc = None
-            return
-
-        self.build_status = "running"
-        threading.Thread(
-            target=self._stream_output, args=(self.build_proc, "build", log_file), daemon=True
-        ).start()
-        self._refresh()
-
-    def _stream_output(self, proc, kind, log_file):
-        commands = {"start": "npm start", "dev": "npm run dev", "build": "npm run build"}
+    def _stream_output(self, name, kind, proc, log_file):
         with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"\n===== {commands[kind]} | {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            f.write(
+                f"\n===== {KIND_LABELS[kind]} | {name} | "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} =====\n"
+            )
             f.flush()
             for line in proc.stdout:
                 f.write(line)
@@ -524,43 +477,32 @@ class NpmHostApp:
             f.write(f"===== exited with code {exit_code} =====\n")
 
         def finish():
-            if kind == "start":
-                self.start_proc = None
-                if self.stopping:
-                    self.start_status = "stopped"
-                else:
-                    self.start_status = "failed" if exit_code != 0 else "stopped"
-                self.stopping = False
-            elif kind == "dev":
-                self.dev_proc = None
-                if self.dev_stopping:
-                    self.dev_status = "stopped"
-                else:
-                    self.dev_status = "failed" if exit_code != 0 else "stopped"
-                self.dev_stopping = False
+            entry = self._state(name)[kind]
+            entry["proc"] = None
+            if entry["stopping"] or exit_code == 0:
+                entry["status"] = IDLE_STATUS[kind]
             else:
-                self.build_proc = None
-                self.build_status = "failed" if exit_code != 0 else "idle"
+                entry["status"] = "failed"
+            entry["stopping"] = False
             self._refresh()
 
         self.root.after(0, finish)
 
     def _on_close(self):
-        active = [p for p in (self.start_proc, self.dev_proc, self.build_proc) if p is not None]
+        active = [
+            entry["proc"]
+            for state in self.states.values()
+            for entry in state.values()
+            if entry["proc"] is not None
+        ]
         if active:
+            plural = "es" if len(active) > 1 else ""
             if not messagebox.askyesno(
-                APP_NAME, "A process is still running. Stop it and exit?"
+                APP_NAME, f"{len(active)} process{plural} still running. Stop and exit?"
             ):
                 return
             for proc in active:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                        capture_output=True,
-                        creationflags=CREATE_NO_WINDOW,
-                    )
-                except OSError:
-                    pass
+                self._kill(proc)
         self.root.destroy()
 
 
